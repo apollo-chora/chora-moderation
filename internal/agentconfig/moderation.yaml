@@ -1,0 +1,41 @@
+# content_moderation — per-sub-agent model + prompt config.
+#
+# AGENT-DRIVEN tiering (CR mana-is-quota-not-model-selector 2026-06-01): this
+# YAML is the single source of truth for each sub-agent's model tier. The crew
+# constructs ONE model-gateway client per sub-agent from primary_model (it
+# routes through chora-model-gateway per ADR-177 — the gateway resolves the
+# logical model id, so model selection stays fully agent-side here).
+# fallback_models is the agent-DECLARED fallback chain, forwarded to the
+# gateway per sub-agent (same shape as qgen).
+#
+# Mana is a token-budget QUOTA system (manaplugin gate), NOT a model selector —
+# the old tieredmodelplugin is no longer registered. See
+# feedback_mana_is_quota_not_model_selector.
+#
+# Tiers (locked 2026-06-01, mirroring qgen's convention):
+#   HIGH  = gemini-3.1-pro-preview → gemini-2.5-pro    (reasoning / judgement-heavy)
+#   CHEAP = gemini-3.5-flash       → gemini-2.5-flash  (classification / labelling)
+#
+# Moderation is a P6 Reflection pair (Moderator → Critic). Per-agent tiering:
+#   - moderator: CHEAP. First-pass classification — labels the post
+#     pass | refine | reject. A bounded-label triage task; the cheap Flash tier
+#     is the correct fit and keeps the high-volume first pass inexpensive.
+#   - critic:    HIGH. LLM-as-judge reflection that emits the FINAL verdict the
+#     chora-sharing service acts on. It must catch what the Moderator missed
+#     (off-platform solicitation, over-flagging, consistency) and justify a
+#     confirm/override — judgement-heavy reasoning → the Pro tier.
+#
+# prompt_version selects the composer template version (currently the
+# embedded v1).
+agent: content_moderation
+sub_agents:
+  moderator:
+    tier: cheap
+    primary_model: gemini-3.5-flash
+    fallback_models: [gemini-2.5-flash]
+    prompt_version: v1
+  critic:
+    tier: high
+    primary_model: gemini-3.1-pro-preview
+    fallback_models: [gemini-2.5-pro]
+    prompt_version: v1

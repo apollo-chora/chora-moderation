@@ -1,137 +1,142 @@
 # chora-moderation
 
-The Chora **content-moderation agent crew**: a 2-agent ADK (Agent Development
-Kit) Go crew that gates user-generated ChoraCircle posts before they reach the
-C+ feed (Phyllis Step 9). It runs a **P6 Reflection** pair — a Moderator
-(first-pass verdict) and a Critic (LLM-as-judge reflection that emits the
-final verdict) — wired as a sequential pipeline.
+## About
 
-> **Not to be confused with `chora-governance`.** That is the standalone
-> governance *service* (policy rules, roles, permissions). This repository is
-> the ADK content-moderation *agent crew*: an LLM pipeline that classifies a
-> single post as `pass | refine | reject`. The two are separate deployables
-> with separate repos.
+`chora-moderation` is a Go service that runs a two-agent content-moderation pipeline for ChoraCircle posts. A Moderator makes the first-pass `pass | refine | reject` decision, then a Critic reviews that decision and returns the final verdict. Both agents run through `chora-model-gateway`; sessions are stored in memory and the service exposes an ADK-compatible HTTP API.
 
-Module path: `github.com/apollo-chora/chora-moderation`.
+## Quick start
 
-The crew is cloud-neutral: NATS is not required, no database is required, and
-model calls flow through `chora-model-gateway` (gRPC) using the shared
-`chora-adk-common` adapters. Traces go to standard OTLP via
-`chora-common/otel`. No cloud account or managed service is required.
+Prerequisites:
 
-## How it works
+- Go 1.26.6 or newer
+- Access to a running `chora-model-gateway` for real model calls
 
-1. The caller (chora-sharing) creates a session via the HTTP API with the
-   post text and author identity in the session state.
-2. The **Moderator** (CHEAP tier, default `gemini-3.5-flash`) issues a
-   first-pass verdict: `pass`, `refine`, or `reject`.
-3. The **Critic** (HIGH tier, default `gemini-3.1-pro-preview`) reviews the
-   Moderator's verdict and emits the **final** verdict
-   (`final_verdict` + `agreement`: confirm | override).
-4. The Critic's verdict is the final answer surfaced to the caller.
-
-Per-sub-agent model selection is **agent-driven**: the tier ladders are
-declared in the embedded `internal/agentconfig/moderation.yaml` (single source
-of truth) and may be overridden per-primary via env vars. Mana is a
-token-budget quota system enforced by the model gateway — it does not select
-models.
-
-## HTTP API
-
-The binary serves the agent-engine-style HTTP surface on port **8080**
-(override with `MODERATION_PORT`):
-
-| Endpoint | Purpose |
-|---|---|
-| `POST /api/reasoning_engine` | Session methods, dispatched by `class_method` |
-| `POST /api/stream_reasoning_engine` | Streaming agent run (`async_stream_query`), SSE-style JSON lines |
-
-`class_method` values on `/api/reasoning_engine`:
-
-| `class_method` | Input | Output |
-|---|---|---|
-| `async_create_session` | `{user_id, state?}` | `{output: session}` |
-| `async_get_session` | `{user_id, session_id}` | `{output: session}` |
-| `async_list_sessions` | `{user_id}` | `{output: {sessions: [...]}}` |
-| `async_delete_session` | `{user_id, session_id}` | `{output: ""}` |
-
-Callers MUST create the session via `async_create_session` and pass:
-
-```json
-{
-  "class_method": "async_create_session",
-  "input": {
-    "user_id": "<user-id>",
-    "state": {
-      "tenant_id": "<tenant-uuid>",
-      "user_gcid": "<author-gcid>",
-      "author_gcid": "<author-gcid>",
-      "post_text": "<post body>",
-      "mana_tier": "basic|standard|premium"
-    }
-  }
-}
-```
-
-The per-turn instruction is recomposed from the session state on every run
-(`internal/agent/instruction_provider.go`), so the real post text — never a
-boot-time placeholder — reaches the model.
-
-## Configuration
-
-| Variable | Purpose | Local default |
-| --- | --- | --- |
-| `MODERATION_PORT` | HTTP port for the crew API | `8080` |
-| `MODERATION_SESSION_APP_NAME` | ADK session AppName (session namespace) | `chora-moderation` |
-| `MODERATION_MODERATOR_MODEL` | Override moderator primary model | `gemini-3.5-flash` (from agentconfig YAML) |
-| `MODERATION_CRITIC_MODEL` | Override critic primary model | `gemini-3.1-pro-preview` (from agentconfig YAML) |
-| `CHORA_GATEWAY_ENDPOINT` | `chora-model-gateway` gRPC endpoint | `gateway.chora.site:443` |
-| `CHORA_GATEWAY_AUDIENCE` | ID-token audience for the gateway | `https://gateway.chora.site` |
-| `CHORA_GATEWAY_TENANT_ID` | Process-fallback tenant for gateway calls (required) | unset |
-| `CHORA_GATEWAY_GCID` | Process-fallback gcid for gateway calls (required) | unset |
-| `CHORA_GATEWAY_TOKEN` | Static bearer token for the model gateway | unset |
-| `CHORA_GATEWAY_INSECURE` | Plaintext gRPC to a local gateway (dev only) | unset |
-| `TENANCY_GRPC_ENDPOINT` | Tenancy service endpoint (`stub://…` for the in-memory stub) | `stub://chora-tenancy` |
-| `SHARING_GRPC_ENDPOINT` | Sharing service endpoint (`stub://…` for the in-memory stub) | `stub://chora-sharing` |
-| `CHORA_ENV` | Environment label | `dev` |
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | OTLP/gRPC trace endpoint | stdout (local dev) |
-| `CHORA_SERVICE_VERSION` | Stamped as the OTLP `service.version` attribute | `dev` |
-
-## Dependencies
-
-- **Model gateway** (`chora-model-gateway`) — required for actual LLM calls;
-  both sub-agents' models are resolved and metered there.
-- **No database** — sessions are in-memory (`session.InMemoryService`), so
-  the service runs best with replicas=1.
-- **No NATS** — this crew does not subscribe to the event bus.
-
-## Layout
-
-| Path | Purpose |
-|---|---|
-| `cmd/moderation/` | Binary entry point: wires config, model clients, plugins, and the HTTP server |
-| `internal/agent/` | Moderator + Critic prompt composers, condition extractor, instruction provider |
-| `internal/agentconfig/` | Embedded per-sub-agent model tier + prompt config (`moderation.yaml`) |
-| `internal/agentserver/` | The crew's HTTP API (session + streaming endpoints) |
-
-## Build and test
+Build and run the service:
 
 ```sh
-go build ./...
-go vet ./...
-go test ./...
+go build ./cmd/moderation
+./moderation
 ```
 
-The suite is hermetic — no broker, database, gateway, or network is required.
+The service listens on port `8080` by default. For local development against a plaintext gateway, set the gateway endpoint and `CHORA_GATEWAY_INSECURE=1`. The gateway also requires a tenant ID and GCID:
 
-## Docker
+```sh
+CHORA_GATEWAY_ENDPOINT=localhost:9090 \
+CHORA_GATEWAY_INSECURE=1 \
+CHORA_GATEWAY_TENANT_ID=<tenant-uuid> \
+CHORA_GATEWAY_GCID=<gcid> \
+./moderation
+```
+
+The repository also includes a Docker build:
 
 ```sh
 docker build -t chora-moderation .
 docker run -p 8080:8080 \
-  -e CHORA_GATEWAY_TENANT_ID=<tenant-uuid> \
-  -e CHORA_GATEWAY_GCID=<gcid> \
   -e CHORA_GATEWAY_ENDPOINT=host.docker.internal:9090 \
   -e CHORA_GATEWAY_INSECURE=1 \
+  -e CHORA_GATEWAY_TENANT_ID=<tenant-uuid> \
+  -e CHORA_GATEWAY_GCID=<gcid> \
   chora-moderation
 ```
+
+## Usage
+
+The server exposes two POST endpoints:
+
+- `/api/reasoning_engine` for session operations
+- `/api/stream_reasoning_engine` for agent runs
+
+Create a session before sending a moderation request:
+
+```sh
+curl -sS http://localhost:8080/api/reasoning_engine \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "class_method": "async_create_session",
+    "input": {
+      "user_id": "<user-id>",
+      "state": {
+        "tenant_id": "<tenant-uuid>",
+        "user_gcid": "<author-gcid>",
+        "author_gcid": "<author-gcid>",
+        "post_text": "<post body>",
+        "mana_tier": "basic"
+      }
+    }
+  }'
+```
+
+The session response contains the generated `id`. Use it with `async_stream_query` to run the Moderator -> Critic pipeline:
+
+```sh
+curl -N http://localhost:8080/api/stream_reasoning_engine \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "class_method": "async_stream_query",
+    "input": {
+      "user_id": "<user-id>",
+      "session_id": "<session-id>",
+      "message": "Run moderation for the post in session state."
+    }
+  }'
+```
+
+The streaming endpoint returns JSON event lines. The request can also use a structured GenAI content object in `input.message`. The moderation prompt is built from the session state on every turn, so `post_text`, tenant ID, and author GCID come from the current session rather than startup-time placeholders.
+
+Session methods supported by `/api/reasoning_engine` are:
+
+| `class_method` | Required input | Result |
+| --- | --- | --- |
+| `async_create_session` | `user_id`, optional `state` | Created session in `output` |
+| `async_get_session` | `user_id`, `session_id` | Session in `output` |
+| `async_list_sessions` | `user_id` | `output.sessions` |
+| `async_delete_session` | `user_id`, `session_id` | Empty `output` |
+
+Model selection is declared in `internal/agentconfig/moderation.yaml`. The Moderator uses the CHEAP tier with primary model `gemini-3.5-flash` and fallback `gemini-2.5-flash`; the Critic uses the HIGH tier with primary model `gemini-3.1-pro-preview` and fallback `gemini-2.5-pro`. `MODERATION_MODERATOR_MODEL` and `MODERATION_CRITIC_MODEL` override the primary model for each sub-agent.
+
+Configuration:
+
+| Variable | Purpose | Default |
+| --- | --- | --- |
+| `MODERATION_PORT` | HTTP listen port | `8080` |
+| `MODERATION_SESSION_APP_NAME` | ADK session app name | `chora-moderation` |
+| `MODERATION_MODERATOR_MODEL` | Moderator primary model override | Configured in YAML |
+| `MODERATION_CRITIC_MODEL` | Critic primary model override | Configured in YAML |
+| `CHORA_GATEWAY_ENDPOINT` | Model gateway gRPC endpoint | `gateway.chora.site:443` |
+| `CHORA_GATEWAY_AUDIENCE` | Gateway ID-token audience | `https://gateway.chora.site` |
+| `CHORA_GATEWAY_TENANT_ID` | Fallback tenant ID for gateway calls | Required |
+| `CHORA_GATEWAY_GCID` | Fallback GCID for gateway calls | Required |
+| `CHORA_GATEWAY_TOKEN` | Static gateway bearer token | Unset |
+| `CHORA_GATEWAY_INSECURE` | Use plaintext gRPC for a local gateway | Unset |
+| `TENANCY_GRPC_ENDPOINT` | Tenancy endpoint | `stub://chora-tenancy` |
+| `SHARING_GRPC_ENDPOINT` | Sharing endpoint | `stub://chora-sharing` |
+| `CHORA_ENV` | Environment label | `dev` |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | OTLP/gRPC trace endpoint | Stdout |
+| `CHORA_SERVICE_VERSION` | OTLP `service.version` value | `dev` |
+
+The service uses an in-memory session store, so sessions are lost when the process stops and the service should run with a single replica when session continuity matters. The moderation service does not require NATS or a database.
+
+Repository layout:
+
+| Path | Purpose |
+| --- | --- |
+| `cmd/moderation/` | Service entry point |
+| `internal/agent/` | Moderator/Critic prompt composition and per-turn state wiring |
+| `internal/agentconfig/` | Embedded model and prompt configuration |
+| `internal/agentserver/` | HTTP API and ADK runner/session integration |
+
+## Development
+
+Format, vet, test, and build from the repository root:
+
+```sh
+gofmt -w .
+go vet ./...
+go test ./...
+go build ./...
+```
+
+The test suite covers prompt composition and determinism, session lifecycle over HTTP, streaming event output, request validation, gateway configuration, and payload limits. Tests use in-memory services and stubs, so they do not require a database, NATS, model gateway, or external network.
+
+GitHub Actions runs formatting checks, `go mod tidy` consistency checks, `go vet ./...`, and `go test ./...` on pushes and pull requests targeting `main`.

@@ -107,36 +107,3 @@ func TestComposeUnknownRoleDefaultsToModerator(t *testing.T) {
 		t.Error("unknown role must default to Moderator")
 	}
 }
-
-func TestMandatorySpanAttributes_coversReflectionPair(t *testing.T) {
-	required := []string{
-		"chora.tenant_id",
-		"chora.author_gcid",
-		"chora.mana_tier",
-		"chora.crew_kind",
-		"chora.moderation.role",
-		"gen_ai.request.model",
-		"gen_ai.usage.output_tokens",
-	}
-	got := MandatorySpanAttributes()
-	seen := make(map[string]struct{}, len(got))
-	for _, k := range got {
-		seen[k] = struct{}{}
-	}
-	for _, r := range required {
-		if _, ok := seen[r]; !ok {
-			t.Errorf("MandatorySpanAttributes missing %q", r)
-		}
-	}
-}
-
-func TestMandatorySpanAttributes_noDuplicates(t *testing.T) {
-	got := MandatorySpanAttributes()
-	seen := make(map[string]struct{}, len(got))
-	for _, k := range got {
-		if _, dup := seen[k]; dup {
-			t.Errorf("duplicate attribute %q", k)
-		}
-		seen[k] = struct{}{}
-	}
-}

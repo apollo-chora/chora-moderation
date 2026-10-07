@@ -287,21 +287,6 @@ func composeCritic(ctx TaskContext) string {
 	return b.String()
 }
 
-// MandatorySpanAttributes is the canonical OTel span attribute list every
-// Moderation OTel span MUST stamp. Per agentic-resilience-d6 SKILL
-// Pillar 4 + ADR-141 D1 accountability.
-func MandatorySpanAttributes() []string {
-	return []string{
-		"chora.tenant_id",
-		"chora.author_gcid",
-		"chora.mana_tier",
-		"chora.crew_kind",
-		"chora.moderation.role", // moderator | critic
-		"gen_ai.request.model",
-		"gen_ai.usage.output_tokens",
-	}
-}
-
 func safe(s, fallback string) string {
 	if strings.TrimSpace(s) == "" {
 		return fallback

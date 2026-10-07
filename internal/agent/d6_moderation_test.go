@@ -46,19 +46,3 @@ func TestD6P3_composeIsConcurrencySafe(t *testing.T) {
 		}
 	}
 }
-
-func TestD6P4_mandatoryAttributesCoverBothRoles(t *testing.T) {
-	got := MandatorySpanAttributes()
-	// chora.moderation.role distinguishes Moderator vs Critic in spans —
-	// load-bearing for the P6 Reflection per-role cost + latency drill-down.
-	found := false
-	for _, k := range got {
-		if k == "chora.moderation.role" {
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Error("MandatorySpanAttributes must include chora.moderation.role to distinguish reflection-pair spans")
-	}
-}

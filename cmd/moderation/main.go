@@ -6,8 +6,8 @@
 // posts before they hit the C+ feed.
 //
 // 2-agent reflection pipeline wired via sequentialagent.New(moderator, critic):
-//   - Moderator (T2 Flash Preview) — first-pass verdict
-//   - Critic    (T1 Pro Preview, LLM-as-judge) — reflects + emits final verdict
+//   - Moderator — first-pass verdict
+//   - Critic    (LLM-as-judge) — reflects + emits final verdict
 //
 // The Critic's output is the final answer surfaced to the caller. Full
 // loopagent iteration with author-edit refinement is Iter 4.5 territory.
@@ -32,18 +32,20 @@
 // Env vars (NEVER inlined per feedback_no_inline_config):
 //
 //	MODERATION_PORT               — HTTP port for the crew API (default 8080)
-//	MODERATION_MODERATOR_MODEL    — override moderator primary (default from agentconfig YAML: gemini-3.5-flash)
-//	MODERATION_CRITIC_MODEL       — override critic primary (default from agentconfig YAML: gemini-3.1-pro-preview)
+//	MODERATION_MODERATOR_MODEL    — override moderator primary (default from agentconfig YAML: longcat-2.5-preview)
+//	MODERATION_CRITIC_MODEL       — override critic primary (default from agentconfig YAML: longcat-2.5-preview)
 //	TENANCY_GRPC_ENDPOINT         — stub:// for POC; gRPC URL in prod
 //	SHARING_GRPC_ENDPOINT         — stub:// for POC; gRPC URL in prod (future ContentPolicyViolationLog publish)
 //	CHORA_ENV                     — dev | staging | prod
 //
-// AGENT-DRIVEN tiering (CR mana-is-quota-not-model-selector 2026-06-01): the
-// per-sub-agent model tier + fallback chain is config-declared in the embedded
-// agentconfig YAML (single source of truth), mirroring qgen. moderator = CHEAP
-// (first-pass classification), critic = HIGH (LLM-as-judge reflection). Mana is
-// a token-budget QUOTA system (manaplugin gate) — it does NOT select the model;
-// the tieredmodelplugin is no longer registered.
+// AGENT-DRIVEN model selection (CR mana-is-quota-not-model-selector
+// 2026-06-01): the per-sub-agent model + fallback chain is config-declared in
+// the embedded agentconfig YAML (single source of truth), mirroring qgen. Both
+// sub-agents (moderator = first-pass classification, critic = LLM-as-judge
+// reflection) now dispatch the single logical model id `longcat-2.5-preview`
+// as primary and sole fallback. Mana is a token-budget QUOTA system
+// (manaplugin gate) — it does NOT select the model; the tieredmodelplugin is no
+// longer registered.
 package main
 
 import (
@@ -134,15 +136,15 @@ func main() {
 		port = p
 	}
 
-	// AGENT-DRIVEN tiering (CR mana-is-quota-not-model-selector 2026-06-01):
-	// per-sub-agent model + fallback chain are config-declared in the
-	// embedded agentconfig YAML (single source of truth), mirroring qgen.
-	// moderator = CHEAP (gemini-3.5-flash → gemini-2.5-flash); critic = HIGH
-	// (gemini-3.1-pro-preview → gemini-2.5-pro). An individual primary may be
-	// overridden via env for quick ops experiments; fallback + tier stay
-	// config-declared. This crew routes both sub-agent models through
-	// chora-model-gateway (ADR-177); model selection stays AGENT-DRIVEN via
-	// the per-sub-agent agentconfig primaries + forwarded fallback chains.
+	// AGENT-DRIVEN model selection (CR mana-is-quota-not-model-selector
+	// 2026-06-01): per-sub-agent model + fallback chain are config-declared in
+	// the embedded agentconfig YAML (single source of truth), mirroring qgen.
+	// moderator and critic both dispatch `longcat-2.5-preview` as primary and
+	// sole fallback. An individual primary may be overridden via env for quick
+	// ops experiments; fallback stays config-declared. This crew routes both
+	// sub-agent models through chora-model-gateway (ADR-177); model selection
+	// stays AGENT-DRIVEN via the per-sub-agent agentconfig primaries +
+	// forwarded fallback chains.
 	modCfg, err := agentconfig.Moderation()
 	if err != nil {
 		log.Fatalf("moderation: load agent config: %v", err)
@@ -185,8 +187,9 @@ func main() {
 	// Per-sub-agent models — route through chora-model-gateway (ADR-177 full
 	// mana umbrella). Both LLM turns flow through the one chokepoint
 	// (central safety policy, per-tenant budget, token-usage ledger).
-	// Model selection stays AGENT-DRIVEN (moderator=CHEAP, critic=HIGH) via
-	// the agentconfig primaries + forwarded fallback chains. Per-request
+	// Model selection stays AGENT-DRIVEN (both sub-agents declare
+	// longcat-2.5-preview) via the agentconfig primaries + forwarded fallback
+	// chains. Per-request
 	// tenant/gcid come from session state via the propagation plugin; env
 	// values are the process fallback.
 	//
@@ -295,8 +298,8 @@ func main() {
 	// 2026-06-01, user directive — mirrors qgen). Mana is a token-budget QUOTA
 	// system (manaplugin gate, above) — it must NOT dictate which LLM model is
 	// used. Model selection is AGENT-DRIVEN via the per-sub-agent agentconfig
-	// YAML (moderator=cheap gemini-3.5-flash / critic=high gemini-3.1-pro-preview),
-	// each sub-agent getting its own gemini.NewModel at boot. The old plugin's
+	// YAML (both sub-agents declare longcat-2.5-preview), each sub-agent
+	// getting its own model-gateway client at boot. The old plugin's
 	// 2.5-only matrix swapped the per-call model id from session.State().mana_tier,
 	// clobbering the agent-declared tier. See
 	// feedback_mana_is_quota_not_model_selector + the CR tracker.

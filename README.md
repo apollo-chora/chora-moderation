@@ -93,7 +93,7 @@ Session methods supported by `/api/reasoning_engine` are:
 | `async_list_sessions` | `user_id` | `output.sessions` |
 | `async_delete_session` | `user_id`, `session_id` | Empty `output` |
 
-Model selection is declared in `internal/agentconfig/moderation.yaml`. The Moderator uses the CHEAP tier with primary model `gemini-3.5-flash` and fallback `gemini-2.5-flash`; the Critic uses the HIGH tier with primary model `gemini-3.1-pro-preview` and fallback `gemini-2.5-pro`. `MODERATION_MODERATOR_MODEL` and `MODERATION_CRITIC_MODEL` override the primary model for each sub-agent.
+Model selection is declared in `internal/agentconfig/moderation.yaml`. The Moderator uses the CHEAP tier and the Critic the HIGH tier; both name the deployment's single text route `longcat-2.5-preview`, which is also what their fallback chains declare. `MODERATION_MODERATOR_MODEL` and `MODERATION_CRITIC_MODEL` override the primary model for each sub-agent.
 
 Configuration:
 

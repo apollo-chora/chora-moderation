@@ -32,22 +32,27 @@
 // Env vars (NEVER inlined per feedback_no_inline_config):
 //
 //	MODERATION_PORT               — HTTP port for the crew API (default 8080)
-//	MODERATION_MODERATOR_MODEL    — override moderator primary (default from agentconfig YAML: longcat-2.5-preview)
-//	MODERATION_CRITIC_MODEL       — override critic primary (default from agentconfig YAML: longcat-2.5-preview)
+//	MODERATION_MODERATOR_MODEL    — moderator gateway logical_model_id (REQUIRED)
+//	MODERATION_CRITIC_MODEL       — critic gateway logical_model_id (REQUIRED)
+//	MODERATION_MODERATOR_FALLBACK_MODELS — optional comma-separated fallback chain (empty = none)
+//	MODERATION_CRITIC_FALLBACK_MODELS    — optional comma-separated fallback chain (empty = none)
 //	TENANCY_GRPC_ENDPOINT         — stub:// for POC; gRPC URL in prod
 //	SHARING_GRPC_ENDPOINT         — stub:// for POC; gRPC URL in prod (future ContentPolicyViolationLog publish)
 //	CHORA_ENV                     — dev | staging | prod
 //
 // AGENT-DRIVEN tiering (CR mana-is-quota-not-model-selector 2026-06-01): the
-// per-sub-agent model tier + fallback chain is config-declared in the embedded
-// agentconfig YAML (single source of truth), mirroring qgen. moderator = CHEAP
-// (first-pass classification), critic = HIGH (LLM-as-judge reflection). Mana is
-// a token-budget QUOTA system (manaplugin gate) — it does NOT select the model;
-// the tieredmodelplugin is no longer registered.
+// per-sub-agent tier + prompt version is config-declared in the embedded
+// agentconfig YAML, mirroring qgen. moderator = CHEAP (first-pass
+// classification), critic = HIGH (LLM-as-judge reflection). The model ids are
+// env-only and REQUIRED — boot fails loud when one is unset rather than
+// routing to a literal name. Mana is a token-budget QUOTA system (manaplugin
+// gate) — it does NOT select the model; the tieredmodelplugin is no longer
+// registered.
 package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"log/slog"
 	"os"
@@ -89,6 +94,79 @@ func envOr(name, fallback string) string {
 func envEnabled(name string) bool {
 	v := strings.TrimSpace(os.Getenv(name))
 	return v == "1" || strings.EqualFold(v, "true")
+}
+
+// Model env names (names only; values come from the container env per
+// feedback_no_inline_config). Every *_MODEL var is REQUIRED — boot fails loud
+// when one is unset rather than falling back to a literal model name. The
+// *_FALLBACK_MODELS vars are optional comma-separated chains: unset (the
+// default) declares no fallback.
+const (
+	envModeratorModel    = "MODERATION_MODERATOR_MODEL"
+	envModeratorFallback = "MODERATION_MODERATOR_FALLBACK_MODELS"
+	envCriticModel       = "MODERATION_CRITIC_MODEL"
+	envCriticFallback    = "MODERATION_CRITIC_FALLBACK_MODELS"
+)
+
+// requiredModel returns the env-provided gateway logical_model_id, failing
+// loud when the var is unset. Model ids are env-only: there is no literal
+// default to fall back to (feedback_no_inline_config).
+func requiredModel(name string) (string, error) {
+	v := strings.TrimSpace(os.Getenv(name))
+	if v == "" {
+		return "", fmt.Errorf("%s required (the gateway logical_model_id; env-only, no default)", name)
+	}
+	return v, nil
+}
+
+// fallbackModels parses a comma-separated env list into the declared fallback
+// chain. Unset / blank (the default) declares no chain, so the gateway is
+// asked for the primary target only.
+func fallbackModels(name string) []string {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return nil
+	}
+	var out []string
+	for _, part := range strings.Split(raw, ",") {
+		if p := strings.TrimSpace(part); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// subAgentModel is one sub-agent's env-resolved gateway identity: the model id
+// (the gateway logical_model_id) and the declared fallback chain.
+type subAgentModel struct {
+	model    string
+	fallback []string
+}
+
+// resolveSubAgentModel resolves one sub-agent's REQUIRED model env var and its
+// optional comma-separated fallback chain. The model var is env-only, so a
+// deploy that forgets it dies at boot rather than routing to a literal name.
+func resolveSubAgentModel(modelEnv, fallbackEnv string) (subAgentModel, error) {
+	m, err := requiredModel(modelEnv)
+	if err != nil {
+		return subAgentModel{}, err
+	}
+	return subAgentModel{model: m, fallback: fallbackModels(fallbackEnv)}, nil
+}
+
+// resolveModels resolves both sub-agents' env-only model ids and declared
+// fallback chains. MODERATION_MODERATOR_MODEL and MODERATION_CRITIC_MODEL are
+// both REQUIRED.
+func resolveModels() (moderator subAgentModel, critic subAgentModel, err error) {
+	moderator, err = resolveSubAgentModel(envModeratorModel, envModeratorFallback)
+	if err != nil {
+		return subAgentModel{}, subAgentModel{}, err
+	}
+	critic, err = resolveSubAgentModel(envCriticModel, envCriticFallback)
+	if err != nil {
+		return subAgentModel{}, subAgentModel{}, err
+	}
+	return moderator, critic, nil
 }
 
 func main() {
@@ -135,14 +213,13 @@ func main() {
 	}
 
 	// AGENT-DRIVEN tiering (CR mana-is-quota-not-model-selector 2026-06-01):
-	// per-sub-agent model + fallback chain are config-declared in the
-	// embedded agentconfig YAML (single source of truth), mirroring qgen.
-	// moderator = CHEAP, critic = HIGH; both name the deployment's ONE text
-	// route, longcat-2.5-preview (as does the declared fallback chain). An
-	// individual primary may be overridden via env for quick ops experiments;
-	// fallback + tier stay config-declared. This crew routes both sub-agent
-	// models through chora-model-gateway (ADR-177); model selection stays
-	// AGENT-DRIVEN via the per-sub-agent agentconfig primaries + forwarded
+	// per-sub-agent tier + prompt version are config-declared in the embedded
+	// agentconfig YAML, mirroring qgen. moderator = CHEAP, critic = HIGH. The
+	// model ids are env-only and REQUIRED (MODERATION_MODERATOR_MODEL /
+	// MODERATION_CRITIC_MODEL) — no literal fallback — and the optional
+	// *_FALLBACK_MODELS chains are forwarded to the gateway. This crew routes
+	// both sub-agent models through chora-model-gateway (ADR-177); model
+	// selection stays AGENT-DRIVEN via the env-provided primaries + forwarded
 	// fallback chains.
 	modCfg, err := agentconfig.Moderation()
 	if err != nil {
@@ -156,8 +233,10 @@ func main() {
 	if err != nil {
 		log.Fatalf("moderation: %v", err)
 	}
-	moderatorModel := envOr("MODERATION_MODERATOR_MODEL", moderatorCfg.PrimaryModel)
-	criticModel := envOr("MODERATION_CRITIC_MODEL", criticCfg.PrimaryModel)
+	moderatorModel, criticModel, err := resolveModels()
+	if err != nil {
+		log.Fatalf("moderation: %v", err)
+	}
 
 	tenancyEndpoint := envOr("TENANCY_GRPC_ENDPOINT", "stub://chora-tenancy")
 	sharingEndpoint := envOr("SHARING_GRPC_ENDPOINT", "stub://chora-sharing")
@@ -172,12 +251,12 @@ func main() {
 
 	slog.Info("moderation boot",
 		"session_app_name", sessionAppName,
-		"moderator_model", moderatorModel,
+		"moderator_model", moderatorModel.model,
 		"moderator_tier", moderatorCfg.Tier,
-		"moderator_fallback", moderatorCfg.FallbackModels,
-		"critic_model", criticModel,
+		"moderator_fallback", moderatorModel.fallback,
+		"critic_model", criticModel.model,
 		"critic_tier", criticCfg.Tier,
-		"critic_fallback", criticCfg.FallbackModels,
+		"critic_fallback", criticModel.fallback,
 		"tenancy_endpoint", tenancyEndpoint,
 		"sharing_endpoint", sharingEndpoint,
 		"chora_env", choraEnv,
@@ -187,7 +266,7 @@ func main() {
 	// mana umbrella). Both LLM turns flow through the one chokepoint
 	// (central safety policy, per-tenant budget, token-usage ledger).
 	// Model selection stays AGENT-DRIVEN (moderator=CHEAP, critic=HIGH) via
-	// the agentconfig primaries + forwarded fallback chains. Per-request
+	// the env-provided model ids + forwarded fallback chains. Per-request
 	// tenant/gcid come from session state via the propagation plugin; env
 	// values are the process fallback.
 	//
@@ -212,13 +291,13 @@ func main() {
 			"(process fallback; per-request values come from session state — no silent " +
 			"mis-attribution per ADR-169 + feedback_no_stubs_real_wiring)")
 	}
-	moderatorGemini, err := modelgatewayclient.New(ctx, moderatorGatewayConfig(crewKind, gatewayEndpoint, gatewayGCID, gatewayTenantID, moderatorCfg, moderatorModel, gatewayAudience, gatewayInsecure))
+	moderatorGemini, err := modelgatewayclient.New(ctx, moderatorGatewayConfig(crewKind, gatewayEndpoint, gatewayGCID, gatewayTenantID, moderatorModel.fallback, moderatorModel.model, gatewayAudience, gatewayInsecure))
 	if err != nil {
-		log.Fatalf("moderation: modelgatewayclient.New(moderator, %s): %v", moderatorModel, err)
+		log.Fatalf("moderation: modelgatewayclient.New(moderator, %s): %v", moderatorModel.model, err)
 	}
-	criticGemini, err := modelgatewayclient.New(ctx, criticGatewayConfig(crewKind, criticCfg, criticModel, gatewayEndpoint, gatewayGCID, gatewayTenantID, gatewayAudience, gatewayInsecure))
+	criticGemini, err := modelgatewayclient.New(ctx, criticGatewayConfig(crewKind, criticModel.fallback, criticModel.model, gatewayEndpoint, gatewayGCID, gatewayTenantID, gatewayAudience, gatewayInsecure))
 	if err != nil {
-		log.Fatalf("moderation: modelgatewayclient.New(critic, %s): %v", criticModel, err)
+		log.Fatalf("moderation: modelgatewayclient.New(critic, %s): %v", criticModel.model, err)
 	}
 
 	// Per-request tenant propagation (ADR-169) — stamp tenant_id/user_gcid from
@@ -295,9 +374,9 @@ func main() {
 	// DELIBERATELY NOT registered here (CR mana-is-quota-not-model-selector
 	// 2026-06-01, user directive — mirrors qgen). Mana is a token-budget QUOTA
 	// system (manaplugin gate, above) — it must NOT dictate which LLM model is
-	// used. Model selection is AGENT-DRIVEN via the per-sub-agent agentconfig
-	// YAML (moderator=cheap / critic=high, both longcat-2.5-preview), each
-	// sub-agent getting its own model-gateway client at boot. The old plugin's
+	// used. Model selection is AGENT-DRIVEN via the env-provided per-sub-agent
+	// model ids (moderator=cheap / critic=high), each sub-agent getting its own
+	// model-gateway client at boot. The old plugin's
 	// 2.5-only matrix swapped the per-call model id from session.State().mana_tier,
 	// clobbering the agent-declared tier. See
 	// feedback_mana_is_quota_not_model_selector + the CR tracker.
@@ -346,12 +425,13 @@ const crewSurface = "content_moderation"
 // moderatorGatewayConfig is the gateway client identity of the moderator call. Surface is
 // the crew id (ADR-254 D7): the D7 gateway refuses an unstamped Invoke
 // (FAILED_PRECONDITION surface_unstamped), so it is set here, once, and
-// asserted by a test; everything else is what the call always sent.
-func moderatorGatewayConfig(crewKind string, gatewayEndpoint string, gatewayGCID string, gatewayTenantID string, moderatorCfg agentconfig.SubAgentConfig, moderatorModel string, gatewayAudience string, gatewayInsecure bool) modelgatewayclient.Config {
+// asserted by a test; everything else is what the call always sent. The model
+// id and the declared fallback chain are env-provided (see resolveModels).
+func moderatorGatewayConfig(crewKind string, gatewayEndpoint string, gatewayGCID string, gatewayTenantID string, moderatorFallback []string, moderatorModel string, gatewayAudience string, gatewayInsecure bool) modelgatewayclient.Config {
 	return modelgatewayclient.Config{
 		Endpoint:         gatewayEndpoint,
 		LogicalModelID:   moderatorModel,
-		FallbackModelIDs: moderatorCfg.FallbackModels,
+		FallbackModelIDs: moderatorFallback,
 		AgentID:          "moderator",
 		CrewKind:         crewKind,
 		TenantID:         gatewayTenantID,
@@ -366,12 +446,13 @@ func moderatorGatewayConfig(crewKind string, gatewayEndpoint string, gatewayGCID
 // criticGatewayConfig is the gateway client identity of the critic call. Surface is
 // the crew id (ADR-254 D7): the D7 gateway refuses an unstamped Invoke
 // (FAILED_PRECONDITION surface_unstamped), so it is set here, once, and
-// asserted by a test; everything else is what the call always sent.
-func criticGatewayConfig(crewKind string, criticCfg agentconfig.SubAgentConfig, criticModel string, gatewayEndpoint string, gatewayGCID string, gatewayTenantID string, gatewayAudience string, gatewayInsecure bool) modelgatewayclient.Config {
+// asserted by a test; everything else is what the call always sent. The model
+// id and the declared fallback chain are env-provided (see resolveModels).
+func criticGatewayConfig(crewKind string, criticFallback []string, criticModel string, gatewayEndpoint string, gatewayGCID string, gatewayTenantID string, gatewayAudience string, gatewayInsecure bool) modelgatewayclient.Config {
 	return modelgatewayclient.Config{
 		Endpoint:         gatewayEndpoint,
 		LogicalModelID:   criticModel,
-		FallbackModelIDs: criticCfg.FallbackModels,
+		FallbackModelIDs: criticFallback,
 		AgentID:          "critic",
 		CrewKind:         crewKind,
 		TenantID:         gatewayTenantID,

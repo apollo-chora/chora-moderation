@@ -18,13 +18,15 @@ go build ./cmd/moderation
 ./moderation
 ```
 
-The service listens on port `8080` by default. For local development against a plaintext gateway, set the gateway endpoint and `CHORA_GATEWAY_INSECURE=1`. The gateway also requires a tenant ID and GCID:
+The service listens on port `8080` by default. For local development against a plaintext gateway, set the gateway endpoint and `CHORA_GATEWAY_INSECURE=1`. The gateway also requires a tenant ID and GCID, and the two sub-agents' model ids are required (there is no built-in default):
 
 ```sh
 CHORA_GATEWAY_ENDPOINT=localhost:9090 \
 CHORA_GATEWAY_INSECURE=1 \
 CHORA_GATEWAY_TENANT_ID=<tenant-uuid> \
 CHORA_GATEWAY_GCID=<gcid> \
+MODERATION_MODERATOR_MODEL=<text-model-id> \
+MODERATION_CRITIC_MODEL=<text-model-id> \
 ./moderation
 ```
 
@@ -37,6 +39,8 @@ docker run -p 8080:8080 \
   -e CHORA_GATEWAY_INSECURE=1 \
   -e CHORA_GATEWAY_TENANT_ID=<tenant-uuid> \
   -e CHORA_GATEWAY_GCID=<gcid> \
+  -e MODERATION_MODERATOR_MODEL=<text-model-id> \
+  -e MODERATION_CRITIC_MODEL=<text-model-id> \
   chora-moderation
 ```
 
@@ -93,7 +97,7 @@ Session methods supported by `/api/reasoning_engine` are:
 | `async_list_sessions` | `user_id` | `output.sessions` |
 | `async_delete_session` | `user_id`, `session_id` | Empty `output` |
 
-Model selection is declared in `internal/agentconfig/moderation.yaml`. The Moderator uses the CHEAP tier with primary model `gemini-3.5-flash` and fallback `gemini-2.5-flash`; the Critic uses the HIGH tier with primary model `gemini-3.1-pro-preview` and fallback `gemini-2.5-pro`. `MODERATION_MODERATOR_MODEL` and `MODERATION_CRITIC_MODEL` override the primary model for each sub-agent.
+Model selection is env-only. `internal/agentconfig/moderation.yaml` declares each sub-agent's tier and prompt version, but no model name: the Moderator uses the CHEAP tier and the Critic the HIGH tier, and each sub-agent's gateway `logical_model_id` comes from its required environment variable (`MODERATION_MODERATOR_MODEL` and `MODERATION_CRITIC_MODEL`). Boot fails when either is unset. Each sub-agent's fallback chain is the optional comma-separated `MODERATION_MODERATOR_FALLBACK_MODELS` / `MODERATION_CRITIC_FALLBACK_MODELS`; unset declares no chain.
 
 Configuration:
 
@@ -101,8 +105,10 @@ Configuration:
 | --- | --- | --- |
 | `MODERATION_PORT` | HTTP listen port | `8080` |
 | `MODERATION_SESSION_APP_NAME` | ADK session app name | `chora-moderation` |
-| `MODERATION_MODERATOR_MODEL` | Moderator primary model override | Configured in YAML |
-| `MODERATION_CRITIC_MODEL` | Critic primary model override | Configured in YAML |
+| `MODERATION_MODERATOR_MODEL` | Moderator gateway logical model id | Required |
+| `MODERATION_CRITIC_MODEL` | Critic gateway logical model id | Required |
+| `MODERATION_MODERATOR_FALLBACK_MODELS` | Moderator fallback chain (comma-separated) | Unset (no chain) |
+| `MODERATION_CRITIC_FALLBACK_MODELS` | Critic fallback chain (comma-separated) | Unset (no chain) |
 | `CHORA_GATEWAY_ENDPOINT` | Model gateway gRPC endpoint | `gateway.chora.site:443` |
 | `CHORA_GATEWAY_AUDIENCE` | Gateway ID-token audience | `https://gateway.chora.site` |
 | `CHORA_GATEWAY_TENANT_ID` | Fallback tenant ID for gateway calls | Required |
@@ -123,7 +129,7 @@ Repository layout:
 | --- | --- |
 | `cmd/moderation/` | Service entry point |
 | `internal/agent/` | Moderator/Critic prompt composition and per-turn state wiring |
-| `internal/agentconfig/` | Embedded model and prompt configuration |
+| `internal/agentconfig/` | Embedded tier and prompt configuration |
 | `internal/agentserver/` | HTTP API and ADK runner/session integration |
 
 ## Development
